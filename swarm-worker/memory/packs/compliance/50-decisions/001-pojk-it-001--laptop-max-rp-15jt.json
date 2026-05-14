@@ -1,0 +1,13 @@
+{
+  "type": "decision",
+  "title": "POJK IT-001: Laptop max Rp 15jt",
+  "content": "Batas maksimal laptop pegawai standard.",
+  "tags": [
+    "pojk",
+    "laptop"
+  ],
+  "source": "reg-001",
+  "created_at": "2026-05-15T00:58:53.187050",
+  "links": [],
+  "score": 0.0
+}

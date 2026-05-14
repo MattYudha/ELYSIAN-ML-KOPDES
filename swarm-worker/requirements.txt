@@ -1,0 +1,23 @@
+# =====================================================
+# Elysian Swarm Worker - Python Dependencies
+# =====================================================
+# Python 3.11+ required
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# Or with uv (recommended):
+#   uv pip install -r requirements.txt
+# =====================================================
+
+# OpenAI-compatible SDK (works with OpenAI, Aliyun Qwen, etc.)
+openai>=1.0.0
+
+# Redis client — queue & pub/sub bridge to Elysian Go Backend
+redis>=5.0.0
+
+# HTTP requests — for sending webhook callback to Go Backend
+requests>=2.31.0
+
+# Environment variable loading
+python-dotenv>=1.0.0

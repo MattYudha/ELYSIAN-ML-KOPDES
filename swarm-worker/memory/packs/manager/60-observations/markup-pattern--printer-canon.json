@@ -1,0 +1,14 @@
+{
+  "type": "observation",
+  "title": "Markup pattern: Printer Canon",
+  "content": "Item 'Printer Canon' di-flag. Auditor: Harga Rp 6jt > POJK Rp 5jt. Verdict: MarkUp 20%",
+  "tags": [
+    "markup",
+    "pattern",
+    "printer"
+  ],
+  "source": "task-004",
+  "created_at": "2026-05-15T01:00:14.981094",
+  "links": [],
+  "score": 0.0
+}

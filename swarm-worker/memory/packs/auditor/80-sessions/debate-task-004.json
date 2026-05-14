@@ -1,0 +1,13 @@
+{
+  "type": "session",
+  "title": "Debate task-004",
+  "content": "{\"item\": \"Printer Canon\", \"auditor\": \"Harga Rp 6jt > POJK Rp 5jt\", \"compliance\": \"Tidak ada pasal\", \"manager\": \"MarkUp 20%\", \"status\": \"FLAGGED\"}",
+  "tags": [
+    "session",
+    "task-004"
+  ],
+  "source": "task-004",
+  "created_at": "2026-05-15T01:00:14.976682",
+  "links": [],
+  "score": 0.0
+}

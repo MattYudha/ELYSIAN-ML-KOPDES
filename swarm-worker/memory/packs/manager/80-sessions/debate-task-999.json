@@ -1,0 +1,13 @@
+{
+  "type": "session",
+  "title": "Debate task-999",
+  "content": "{\"item\": \"Test Item\", \"auditor\": \"Auditor says markup\", \"compliance\": \"Compliance agrees\", \"manager\": \"FLAGGED\", \"status\": \"FLAGGED\"}",
+  "tags": [
+    "session",
+    "task-999"
+  ],
+  "source": "task-999",
+  "created_at": "2026-05-15T01:01:11.391282",
+  "links": [],
+  "score": 0.0
+}
