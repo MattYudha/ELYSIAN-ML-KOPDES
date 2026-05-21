@@ -3,7 +3,8 @@ import sys
 import json
 import time
 import hashlib
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import requests
 import redis
 from openai import OpenAI
@@ -48,25 +49,36 @@ else:
     print("[Init] WARNING: DUMMY_POJK_Standar_Harga.md not found. Auditor will use LLM base knowledge only.")
 
 # ------------------------------------------------------------------------------
-# Nemesis Ground Truth Database (SQLite)
+# Nemesis Ground Truth Database (PostgreSQL Instance 2 - Dedicated)
 # ------------------------------------------------------------------------------
-_NEMESIS_DB_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "nemesis-groundtruth", "data", "nemesis.db"
-)
+NEMESIS_DB_HOST = os.getenv("NEMESIS_DB_HOST", "localhost")
+NEMESIS_DB_PORT = int(os.getenv("NEMESIS_DB_PORT", 5432))
+NEMESIS_DB_USER = os.getenv("NEMESIS_DB_USER", "postgres")
+NEMESIS_DB_PASSWORD = os.getenv("NEMESIS_DB_PASSWORD", "postgres")
+NEMESIS_DB_NAME = os.getenv("NEMESIS_DB_NAME", "nemesis_db")
+NEMESIS_DB_SSLMODE = os.getenv("NEMESIS_DB_SSLMODE", "disable")
 
 _nemesis_conn = None
 
 
 def _get_nemesis_conn():
-    """Lazy-init SQLite connection to Nemesis DB."""
+    """Lazy-init PostgreSQL connection to Nemesis DB."""
     global _nemesis_conn
     if _nemesis_conn is None:
-        if os.path.exists(_NEMESIS_DB_PATH):
-            _nemesis_conn = sqlite3.connect(_NEMESIS_DB_PATH, check_same_thread=False)
-            _nemesis_conn.row_factory = sqlite3.Row
-            print(f"[Init] Connected to Nemesis DB: {_NEMESIS_DB_PATH}")
-        else:
-            print(f"[Init] WARNING: Nemesis DB not found at {_NEMESIS_DB_PATH}")
+        try:
+            _nemesis_conn = psycopg2.connect(
+                host=NEMESIS_DB_HOST,
+                port=NEMESIS_DB_PORT,
+                user=NEMESIS_DB_USER,
+                password=NEMESIS_DB_PASSWORD,
+                dbname=NEMESIS_DB_NAME,
+                sslmode=NEMESIS_DB_SSLMODE
+            )
+            _nemesis_conn.autocommit = True
+            print(f"[Init] Connected to Dedicated Nemesis PostgreSQL DB: {NEMESIS_DB_HOST}:{NEMESIS_DB_PORT}/{NEMESIS_DB_NAME}")
+        except Exception as e:
+            print(f"[Init] WARNING: Could not connect to Nemesis PostgreSQL: {e}")
+            _nemesis_conn = None
     return _nemesis_conn
 
 
@@ -90,17 +102,19 @@ def query_nemesis_price(item_name: str, location: str = None) -> dict:
             MAX(budget_amount) as max_price,
             AVG(waste_potential_score) as avg_waste
         FROM procurement
-        WHERE package_name LIKE ? OR work_description LIKE ?
+        WHERE package_name LIKE %s OR work_description LIKE %s
     """
     params.append(keyword)
 
     if location:
-        sql += " AND location LIKE ?"
+        sql += " AND location LIKE %s"
         params.append(f"%{location}%")
 
     try:
-        cursor = conn.execute(sql, params)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(sql, params)
         row = cursor.fetchone()
+        cursor.close()
         return {
             "sample_count": row["sample_count"] or 0,
             "avg_price": int(row["avg_price"] or 0),
@@ -124,13 +138,15 @@ def query_standard_price(item_name: str) -> dict:
     keyword = f"%{item_name}%"
 
     try:
-        cursor = conn.execute("""
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
             SELECT item_name, item_category, max_price, min_specs
             FROM standard_price
-            WHERE item_name LIKE ? OR item_category LIKE ?
+            WHERE item_name LIKE %s OR item_category LIKE %s
             LIMIT 1
         """, [keyword, keyword])
         row = cursor.fetchone()
+        cursor.close()
         if row:
             return {
                 "item_name": row["item_name"],
@@ -161,7 +177,23 @@ def run_agent(system_prompt: str, user_prompt: str) -> str:
         return f"Error connecting to LLM: {str(e)}"
 
 
-def run_swarm_evaluation(item: dict, task_id: str = "") -> tuple[str, list, str]:
+def publish_progress(redis_conn, task_id, status, step, agent=None, message=None, progress=0):
+    payload = {
+        "task_id": task_id,
+        "status": status,
+        "step": step,
+        "agent": agent,
+        "message": message,
+        "progress": progress,
+        "timestamp": int(time.time() * 1000)
+    }
+    try:
+        redis_conn.publish("swarm:events", json.dumps(payload))
+    except Exception as e:
+        print(f"[Redis Publish Error] {e}")
+
+
+def run_swarm_evaluation(r, item: dict, task_id: str = "") -> tuple[str, list, str]:
     """
     Executes the multi-agent swarm evaluation for a single budget item.
 
@@ -179,6 +211,8 @@ def run_swarm_evaluation(item: dict, task_id: str = "") -> tuple[str, list, str]
     item_name = item.get('name', '')
     item_location = item.get('metadata', {}).get('region', '') if item.get('metadata') else ''
 
+    publish_progress(r, task_id, "PROCESSING", f"Querying regional prices and POJK reference for: {item_name}...", agent="System", progress=15)
+
     # ------------------------------------------------------------------
     # 1. Agent Analis (Auditor) — with Nemesis + Memory Context
     # ------------------------------------------------------------------
@@ -187,6 +221,8 @@ def run_swarm_evaluation(item: dict, task_id: str = "") -> tuple[str, list, str]
     # Query Nemesis DB for historical prices
     nemesis_data = query_nemesis_price(item_name, item_location)
     standard_data = query_standard_price(item_name)
+
+    publish_progress(r, task_id, "PROCESSING", f"Retrieved POJK standard and Nemesis historical samples for {item_name}.", agent="System", progress=25)
 
     # Query Agent Memory (pi-memctx pattern: inject before reasoning)
     memory_context = ""
@@ -225,15 +261,15 @@ Standar Harga Resmi (POJK/SHSR):
     )
 
     auditor_system = f"""
-Kamu adalah Agen Analis (Auditor Anggaran) di Pemerintah Daerah.
-Tugasmu adalah membandingkan item anggaran yang diajukan dengan data historis pengadaan (Nemesis) dan Standar Harga Regional.
+Kamu adalah Agen Analis (Auditor Anggaran) Pemerintah Daerah.
+Tugasmu adalah memeriksa apakah harga barang yang diajukan wajar atau kemahalan (markup) dibanding Standar Harga Resmi (POJK) dan riwayat pembelian.
 
-Aturan:
-1. Jika harga diajukan > batas standar harga resmi (POJK), nyatakan MARKUP beserta persentase dan selisih.
-2. Jika harga diajukan > rata-rata historis Nemesis lebih dari 30%, nyatakan MARKUP.
-3. Jika ada justifikasi teknis yang kuat (spesifikasi di atas minimum), nyatakan WAJAR dengan catatan.
-4. Selalu sebutkan angka perbandingannya (harga diajukan vs standar vs historis).
-5. Jawab singkat (maksimal 3 kalimat).{standar_harga_section}
+Aturan Penulisan:
+1. Gunakan Bahasa Indonesia yang santun, sederhana, dan mudah dimengerti orang awam. Jangan gunakan istilah teknis IT atau istilah asing.
+2. JANGAN gunakan format markdown seperti heading (##), list (-), atau sub-judul tebal. Tulis langsung dalam 2-3 kalimat paragraf biasa.
+3. Sebutkan dengan jelas: harga yang diajukan, batas maksimal resmi, dan selisihnya.
+4. Nyatakan kesimpulan akhir secara langsung: Kemahalan (Markup) atau Wajar.
+{standar_harga_section}
 {memory_context}
 """
 
@@ -248,18 +284,22 @@ Aturan:
     if standard_data:
         print(f"      Standard: max=Rp {standard_data['max_price']:,.0f}")
 
+    publish_progress(r, task_id, "PROCESSING", f"Analis (Auditor) sedang membandingkan harga regional untuk {item_name}...", agent="Auditor", progress=35)
     auditor_response = run_agent(auditor_system, auditor_prompt)
+    publish_progress(r, task_id, "PROCESSING", f"Auditor selesai mengevaluasi {item_name}.", agent="Auditor", message=auditor_response, progress=50)
 
     # ------------------------------------------------------------------
     # 2. Agent Pengawas (Compliance)
     # ------------------------------------------------------------------
     compliance_system = """
-    Kamu adalah Agen Pengawas (Compliance/Legal) di Pemerintah Daerah.
-    Tugasmu adalah meninjau temuan dari Agen Analis dan mengevaluasi apakah
-    ada justifikasi atau pasal regulasi yang mengizinkan pengecualian harga
-    (misalnya spesifikasi khusus untuk departemen tertentu).
-    Jawab secara legal dan kepatuhan (maksimal 3 kalimat).
-    """
+Kamu adalah Agen Pengawas (Hukum & Kepatuhan) Pemerintah Daerah.
+Tugasmu adalah memeriksa apakah pengajuan harga yang melebihi batas ini diizinkan oleh aturan hukum (misalnya ada alasan khusus yang sah).
+
+Aturan Penulisan:
+1. Gunakan Bahasa Indonesia yang sederhana dan langsung pada intinya. Hindari pasal-pasal hukum yang rumit agar mudah dipahami orang non-IT/awam.
+2. JANGAN gunakan format markdown, heading, list, atau sub-judul tebal. Tulis langsung dalam 2-3 kalimat paragraf biasa.
+3. Nyatakan apakah pengajuan ini memiliki dokumen pendukung/alasan sah atau tidak. Jika tidak, sebutkan bahwa pengajuan ditolak karena melanggar batas harga resmi.
+"""
 
     compliance_user = (
         f"Item yang diajukan:\n{item_json}\n\n"
@@ -267,22 +307,26 @@ Aturan:
         f"Berikan evaluasi kepatuhanmu:"
     )
     print(f"  -> [Compliance] Reviewing: {item.get('name')}")
+    publish_progress(r, task_id, "PROCESSING", f"Pengawas (Compliance) sedang meninjau aspek kepatuhan legal untuk {item_name}...", agent="Pengawas", progress=65)
     compliance_response = run_agent(compliance_system, compliance_user)
+    publish_progress(r, task_id, "PROCESSING", f"Compliance selesai meninjau {item_name}.", agent="Pengawas", message=compliance_response, progress=80)
 
     # ------------------------------------------------------------------
     # 3. Agent Manajer (Decision Maker)
     # ------------------------------------------------------------------
     manager_system = """
-    Kamu adalah Agen Manajer (Kepala Review).
-    Tugasmu adalah membaca temuan Auditor dan Pengawas, lalu memberikan kesimpulan akhir.
-    Kamu HARUS merespon hanya dalam format JSON valid berikut:
-    {
-        "status": "FLAGGED" | "CLEARED",
-        "manager_conclusion": "Kesimpulan singkat maksimal 2 kalimat"
-    }
-    Gunakan "FLAGGED" jika ada indikasi kuat markup yang tidak memiliki justifikasi legal.
-    Gunakan "CLEARED" jika harga wajar atau ada justifikasi legal yang kuat.
-    """
+Kamu adalah Agen Manajer (Kepala Swarm).
+Tugasmu memberikan keputusan akhir yang sangat singkat, padat, dan jelas berdasarkan laporan Auditor dan Pengawas.
+
+Aturan Penulisan:
+1. Gunakan Bahasa Indonesia yang sangat sederhana dan langsung ke kesimpulan untuk pengguna non-IT.
+2. Kamu HARUS merespon HANYA dalam format JSON valid berikut:
+{
+    "status": "FLAGGED" | "CLEARED",
+    "manager_conclusion": "Tulis kesimpulan akhir di sini dalam 1-2 kalimat sederhana tanpa format markdown."
+}
+3. Gunakan "FLAGGED" jika harga kemahalan dan melanggar batas resmi. Gunakan "CLEARED" jika harga dinilai wajar.
+"""
 
     manager_user = (
         f"Item:\n{item_json}\n\n"
@@ -291,20 +335,45 @@ Aturan:
         f"Berikan kesimpulan JSON:"
     )
     print(f"  -> [Manager] Concluding: {item.get('name')}")
+    publish_progress(r, task_id, "PROCESSING", f"Kepala Manajer membuat konsensus akhir untuk {item_name}...", agent="Manager", progress=88)
     manager_response_raw = run_agent(manager_system, manager_user)
 
-    # Parse manager JSON — with graceful fallback
+    # Parse manager JSON — with robust regex & fallback parsing
     status = "CLEARED"
-    manager_conclusion = "Tidak dapat mem-parsing kesimpulan Manajer."
+    manager_conclusion = ""
+    clean_json = manager_response_raw.replace("```json", "").replace("```", "").strip()
     try:
-        clean_json = manager_response_raw.replace("```json", "").replace("```", "").strip()
         manager_data = json.loads(clean_json)
         status = manager_data.get("status", "CLEARED")
-        manager_conclusion = manager_data.get("manager_conclusion", manager_response_raw)
+        manager_conclusion = manager_data.get("manager_conclusion", "")
     except Exception as e:
         print(f"[JSON Error] Failed to parse manager response: {e}")
-        status = "FLAGGED" if "FLAGGED" in manager_response_raw.upper() else "CLEARED"
-        manager_conclusion = manager_response_raw
+        
+    # If json.loads failed or returned empty conclusion, try regex extraction
+    if not manager_conclusion:
+        import re
+        status_match = re.search(r'"status"\s*:\s*"([^"]+)"', clean_json)
+        conclusion_match = re.search(r'"manager_conclusion"\s*:\s*"([^"]+)"', clean_json)
+        if status_match:
+            status = status_match.group(1)
+        else:
+            status = "FLAGGED" if "FLAGGED" in manager_response_raw.upper() else "CLEARED"
+            
+        if conclusion_match:
+            manager_conclusion = conclusion_match.group(1)
+        else:
+            # Clean up the raw response text
+            manager_conclusion = manager_response_raw
+
+    # Trim and make sure it has no raw JSON styling
+    manager_conclusion = manager_conclusion.strip()
+    if manager_conclusion.startswith("{") and manager_conclusion.endswith("}"):
+        import re
+        match = re.search(r'"manager_conclusion"\s*:\s*"([^"]+)"', manager_conclusion)
+        if match:
+            manager_conclusion = match.group(1)
+
+    publish_progress(r, task_id, "PROCESSING", f"Manager selesai memproses {item_name}: {status}.", agent="Manager", message=manager_conclusion, progress=95)
 
     agent_logs = [
         {"agent": "Auditor", "action": "Price Checking", "message": auditor_response},
@@ -330,19 +399,22 @@ Aturan:
     return status, agent_logs, manager_conclusion
 
 
-def process_task(task_data: dict) -> None:
+def process_task(r, task_data: dict) -> None:
     """Process the swarm task by orchestrating the agents."""
     task_id = task_data.get("task_id")
     webhook_url = task_data.get("webhook_url")
     items = task_data.get("items", [])
 
     print(f"\n[Worker] Processing task {task_id} with {len(items)} items")
+    publish_progress(r, task_id, "PROCESSING", "Inisialisasi Swarm Review Pipeline. Menghubungkan ke agen...", agent="System", progress=5)
 
     results = []
     markup_count = 0
 
-    for item in items:
-        status, agent_logs, manager_conclusion = run_swarm_evaluation(item, task_id)
+    for idx, item in enumerate(items):
+        item_name = item.get('name', f"Item {idx+1}")
+        publish_progress(r, task_id, "PROCESSING", f"Memulai analisis item {idx+1} dari {len(items)}: {item_name}...", agent="System", progress=10)
+        status, agent_logs, manager_conclusion = run_swarm_evaluation(r, item, task_id)
 
         if status == "FLAGGED":
             markup_count += 1
@@ -391,6 +463,7 @@ def process_task(task_data: dict) -> None:
     if webhook_url:
         print(f"[Worker] Sending webhook to {webhook_url}")
         print(f"[Worker] Hashes: rationale={rationale_hash}, consensus={consensus_hash}")
+        publish_progress(r, task_id, "PROCESSING", "Mengirimkan hasil konsensus ke core ledger backend...", agent="System", progress=98)
         try:
             resp = requests.post(webhook_url, json=response_payload, timeout=10)
             resp.raise_for_status()
@@ -427,7 +500,7 @@ def main() -> None:
             if result:
                 _queue_name, task_json = result
                 task_data = json.loads(task_json)
-                process_task(task_data)
+                process_task(r, task_data)
         except json.JSONDecodeError:
             print(f"[Worker] Failed to decode task JSON: {task_json}")
         except Exception as e:

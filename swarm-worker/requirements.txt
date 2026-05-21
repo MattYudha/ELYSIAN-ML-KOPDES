@@ -21,3 +21,6 @@ requests>=2.31.0
 
 # Environment variable loading
 python-dotenv>=1.0.0
+
+# PostgreSQL driver for Nemesis Price Reference DB migration
+psycopg2-binary>=2.9.0
