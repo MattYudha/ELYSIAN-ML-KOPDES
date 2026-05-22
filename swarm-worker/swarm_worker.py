@@ -86,78 +86,113 @@ def query_nemesis_price(item_name: str, location: str = None) -> dict:
     """
     Query historical price data from Nemesis for a given item keyword.
     Returns avg/min/max prices and sample count.
+    Supports fallback to the first word of the item_name if no samples are found.
     """
     conn = _get_nemesis_conn()
     if conn is None:
         return {}
 
-    keyword = f"%{item_name}%"
-    params = [keyword]
+    def run_query(term: str) -> dict:
+        keyword = f"%{term}%"
+        params = [keyword]
 
-    sql = """
-        SELECT
-            COUNT(*) as sample_count,
-            AVG(budget_amount) as avg_price,
-            MIN(budget_amount) as min_price,
-            MAX(budget_amount) as max_price,
-            AVG(waste_potential_score) as avg_waste
-        FROM procurement
-        WHERE package_name LIKE %s OR work_description LIKE %s
-    """
-    params.append(keyword)
+        sql = """
+            SELECT
+                COUNT(*) as sample_count,
+                AVG(budget_amount) as avg_price,
+                MIN(budget_amount) as min_price,
+                MAX(budget_amount) as max_price,
+                AVG(waste_potential_score) as avg_waste
+            FROM procurement
+            WHERE package_name ILIKE %s OR work_description ILIKE %s
+        """
+        params.append(keyword)
 
-    if location:
-        sql += " AND location LIKE %s"
-        params.append(f"%{location}%")
+        if location:
+            sql += " AND location ILIKE %s"
+            params.append(f"%{location}%")
 
-    try:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        cursor.close()
-        return {
-            "sample_count": row["sample_count"] or 0,
-            "avg_price": int(row["avg_price"] or 0),
-            "min_price": int(row["min_price"] or 0),
-            "max_price": int(row["max_price"] or 0),
-            "avg_waste": round(row["avg_waste"] or 0, 2),
-        }
-    except Exception as e:
-        print(f"[Nemesis Query Error] {e}")
-        return {}
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return {
+                "sample_count": row["sample_count"] or 0,
+                "avg_price": int(row["avg_price"] or 0),
+                "min_price": int(row["min_price"] or 0),
+                "max_price": int(row["max_price"] or 0),
+                "avg_waste": round(row["avg_waste"] or 0, 2),
+            }
+        except Exception as e:
+            print(f"[Nemesis Query Error] {e}")
+            return {}
+
+    # 1. Try full search term
+    result = run_query(item_name)
+    if result.get("sample_count", 0) > 0:
+        return result
+
+    # 2. Try first word fallback if multiple words exist
+    words = [w for w in item_name.split() if len(w) > 1]
+    if len(words) > 1:
+        fallback_term = words[0]
+        print(f"[Nemesis Fallback] No samples for '{item_name}', trying '{fallback_term}'...")
+        fallback_result = run_query(fallback_term)
+        return fallback_result
+
+    return result
+
 
 
 def query_standard_price(item_name: str) -> dict:
     """
     Query official standard price limit from POJK/SHSR.
+    Supports ILIKE and fallback to the first word of item_name if no match is found.
     """
     conn = _get_nemesis_conn()
     if conn is None:
         return {}
 
-    keyword = f"%{item_name}%"
+    def run_query(term: str) -> dict:
+        keyword = f"%{term}%"
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT item_name, item_category, max_price, min_specs
+                FROM standard_price
+                WHERE item_name ILIKE %s OR item_category ILIKE %s
+                LIMIT 1
+            """, [keyword, keyword])
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return {
+                    "item_name": row["item_name"],
+                    "category": row["item_category"],
+                    "max_price": row["max_price"],
+                    "min_specs": row["min_specs"],
+                }
+            return {}
+        except Exception as e:
+            print(f"[Standard Price Query Error] {e}")
+            return {}
 
-    try:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT item_name, item_category, max_price, min_specs
-            FROM standard_price
-            WHERE item_name LIKE %s OR item_category LIKE %s
-            LIMIT 1
-        """, [keyword, keyword])
-        row = cursor.fetchone()
-        cursor.close()
-        if row:
-            return {
-                "item_name": row["item_name"],
-                "category": row["item_category"],
-                "max_price": row["max_price"],
-                "min_specs": row["min_specs"],
-            }
-        return {}
-    except Exception as e:
-        print(f"[Standard Price Query Error] {e}")
-        return {}
+    # 1. Try full search term
+    result = run_query(item_name)
+    if result:
+        return result
+
+    # 2. Try first word fallback if multiple words exist
+    words = [w for w in item_name.split() if len(w) > 1]
+    if len(words) > 1:
+        fallback_term = words[0]
+        print(f"[Standard Price Fallback] No match for '{item_name}', trying '{fallback_term}'...")
+        fallback_result = run_query(fallback_term)
+        return fallback_result
+
+    return result
+
 
 
 def run_agent(system_prompt: str, user_prompt: str) -> str:
@@ -171,7 +206,10 @@ def run_agent(system_prompt: str, user_prompt: str) -> str:
             ],
             temperature=0.2,  # Low temperature for analytical tasks
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        import re
+        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        return content
     except Exception as e:
         print(f"[LLM Error] {e}")
         return f"Error connecting to LLM: {str(e)}"
@@ -216,7 +254,7 @@ def run_swarm_evaluation(r, item: dict, task_id: str = "") -> tuple[str, list, s
     # ------------------------------------------------------------------
     # 1. Agent Analis (Auditor) — with Nemesis + Memory Context
     # ------------------------------------------------------------------
-    item_price = item.get('unit_price', 0)
+    item_price = item.get('unit_price', item.get('requested_price', 0))
 
     # Query Nemesis DB for historical prices
     nemesis_data = query_nemesis_price(item_name, item_location)
@@ -269,6 +307,7 @@ Aturan Penulisan:
 2. JANGAN gunakan format markdown seperti heading (##), list (-), atau sub-judul tebal. Tulis langsung dalam 2-3 kalimat paragraf biasa.
 3. Sebutkan dengan jelas: harga yang diajukan, batas maksimal resmi, dan selisihnya.
 4. Nyatakan kesimpulan akhir secara langsung: Kemahalan (Markup) atau Wajar.
+5. Jika ada data historis pengadaan serupa dari Nemesis (SIRUP), sebutkan secara singkat perbandingan harga historisnya (misalnya rata-rata harga pengadaan serupa) untuk memperkuat hasil analisismu.
 {standar_harga_section}
 {memory_context}
 """

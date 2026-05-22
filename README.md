@@ -202,10 +202,21 @@ cp .env.example .env
 # REDIS_PORT=6379
 # LLM_API_KEY=your_key
 # LLM_BASE_URL=https://api.openai.com/v1
+# NEMESIS_DB_HOST=localhost
+# NEMESIS_DB_PORT=5432
+# NEMESIS_DB_USER=elysian
+# NEMESIS_DB_PASSWORD=elysian123
+# NEMESIS_DB_NAME=nemesis_db
 
 # 4. Run worker
 python swarm_worker.py
 ```
+
+### Nemesis Ground Truth DB Integration:
+Swarm worker terintegrasi langsung dengan database `nemesis_db` (PostgreSQL) untuk mencari batas harga standard (`standard_price`) dan data statistik pengadaan historis (`procurement`). Fitur pencarian meliputi:
+- **Case-Insensitive (`ILIKE`)**: Pencarian kata kunci mengabaikan perbedaan huruf kapital.
+- **First-Word Fallback**: Jika kata kunci lengkap (misalnya `"Laptop IT"`) tidak memiliki data histori (0 sampel), query secara otomatis akan mencoba ulang dengan kata pertama saja (`"Laptop"`) untuk keandalan maksimal.
+
 
 ### MiroFish API:
 ```bash
