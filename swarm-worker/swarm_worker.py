@@ -195,6 +195,40 @@ def query_standard_price(item_name: str) -> dict:
 
 
 
+OPENVIKING_API_URL = os.getenv("OPENVIKING_API_URL", "http://localhost:1929")
+
+
+def query_local_regulations(item_name: str) -> list:
+    """
+    Query OpenViking RAG engine for local regulations matching the item description.
+    """
+    if not OPENVIKING_API_URL:
+        return []
+
+    url = f"{OPENVIKING_API_URL}/api/v1/search/find"
+    payload = {
+        "query": item_name,
+        "top_k": 2
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results", [])
+            chunks = []
+            for r in results:
+                text = r.get("content") or r.get("text") or ""
+                if text:
+                    chunks.append(text)
+            return chunks
+        else:
+            print(f"[OpenViking Warning] Returned status code {resp.status_code}")
+            return []
+    except Exception as e:
+        print(f"[OpenViking Error] Failed to query local regulations: {e}")
+        return []
+
+
 def run_agent(system_prompt: str, user_prompt: str) -> str:
     """Utility to run a single agent completion."""
     try:
@@ -298,6 +332,20 @@ Standar Harga Resmi (POJK/SHSR):
         if STANDAR_HARGA_CONTEXT else ""
     )
 
+    override_context = ""
+    override = item.get("override")
+    if override:
+        override_context = f"""
+
+[PENGATURAN KOREKSI MANUSIA (RLHF OVERRIDE)]
+Catatan perbaikan manual sebelumnya untuk barang ini:
+- Keputusan awal: {override.get('original_verdict')}
+- Keputusan yang dikoreksi: {override.get('new_verdict')}
+- Alasan koreksi: {override.get('justification')}
+
+Instruksi Penting: Kamu HARUS mengikuti koreksi manual di atas sebagai acuan utama dalam evaluasimu.
+"""
+
     auditor_system = f"""
 Kamu adalah Agen Analis (Auditor Anggaran) Pemerintah Daerah.
 Tugasmu adalah memeriksa apakah harga barang yang diajukan wajar atau kemahalan (markup) dibanding Standar Harga Resmi (POJK) dan riwayat pembelian.
@@ -310,6 +358,7 @@ Aturan Penulisan:
 5. Jika ada data historis pengadaan serupa dari Nemesis (SIRUP), sebutkan secara singkat perbandingan harga historisnya (misalnya rata-rata harga pengadaan serupa) untuk memperkuat hasil analisismu.
 {standar_harga_section}
 {memory_context}
+{override_context}
 """
 
     auditor_prompt = f"""Evaluasi item ini:
@@ -340,10 +389,17 @@ Aturan Penulisan:
 3. Nyatakan apakah pengajuan ini memiliki dokumen pendukung/alasan sah atau tidak. Jika tidak, sebutkan bahwa pengajuan ditolak karena melanggar batas harga resmi.
 """
 
+    # Query OpenViking RAG for local regulations context
+    regulations = query_local_regulations(item_name)
+    regulations_context = ""
+    if regulations:
+        regulations_context = "\n\nKonteks Regulasi Lokal Terkait (RAG):\n" + "\n---\n".join(regulations)
+
     compliance_user = (
         f"Item yang diajukan:\n{item_json}\n\n"
         f"Temuan Auditor:\n{auditor_response}\n\n"
-        f"Berikan evaluasi kepatuhanmu:"
+        f"{regulations_context}\n\n"
+        f"Berikan evaluasi kepatuhanmu berdasarkan temuan auditor dan konteks regulasi lokal yang tersedia:"
     )
     print(f"  -> [Compliance] Reviewing: {item.get('name')}")
     publish_progress(r, task_id, "PROCESSING", f"Pengawas (Compliance) sedang meninjau aspek kepatuhan legal untuk {item_name}...", agent="Pengawas", progress=65)
@@ -435,7 +491,8 @@ Aturan Penulisan:
         total_notes = sum(len(v) for v in learned.values())
         print(f"      Memory: learned {total_notes} notes across agents")
 
-    return status, agent_logs, manager_conclusion
+    max_price = standard_data.get("max_price", 0) if standard_data else 0
+    return status, agent_logs, manager_conclusion, max_price
 
 
 def process_task(r, task_data: dict) -> None:
@@ -453,13 +510,19 @@ def process_task(r, task_data: dict) -> None:
     for idx, item in enumerate(items):
         item_name = item.get('name', f"Item {idx+1}")
         publish_progress(r, task_id, "PROCESSING", f"Memulai analisis item {idx+1} dari {len(items)}: {item_name}...", agent="System", progress=10)
-        status, agent_logs, manager_conclusion = run_swarm_evaluation(r, item, task_id)
+        status, agent_logs, manager_conclusion, max_price = run_swarm_evaluation(r, item, task_id)
 
         if status == "FLAGGED":
             markup_count += 1
 
+        item_location = item.get('metadata', {}).get('region', '') if item.get('metadata') else ''
         results.append({
             "item_id": item.get("item_id"),
+            "name": item_name,
+            "qty": item.get("qty", 1),
+            "requested_price": item.get("unit_price", item.get("requested_price", 0)),
+            "max_price": max_price,
+            "region": item_location,
             "status": status,
             "agent_logs": agent_logs,
             "manager_conclusion": manager_conclusion,
