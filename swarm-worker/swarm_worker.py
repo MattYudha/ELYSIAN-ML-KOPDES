@@ -370,6 +370,7 @@ Aturan Penulisan:
 4. Nyatakan kesimpulan akhir secara langsung: Kemahalan (Markup) atau Wajar.
 5. Jika ada data historis pengadaan serupa dari Nemesis (SIRUP), sebutkan secara singkat perbandingan harga historisnya (misalnya rata-rata harga pengadaan serupa) untuk memperkuat hasil analisismu.
 6. PENTING: Tulis respon Anda dengan sangat singkat dan padat (maksimal 3 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...'). Tulis kalimat secara mengalir, ringkas, dan langsung ke inti informasi.
+7. DILARANG KERAS menulis dalam bahasa Mandarin, menggunakan huruf/aksara China (中文/汉字), atau tanda baca Mandarin. Seluruh respon Anda wajib ditulis 100% dalam Bahasa Indonesia yang baik dan benar.
 {standar_harga_section}
 {memory_context}
 {override_context}
@@ -404,6 +405,7 @@ Aturan Penulisan:
 2. JANGAN gunakan format markdown, heading, list, atau sub-judul tebal. Tulis langsung dalam 2-3 kalimat paragraf biasa.
 3. Nyatakan apakah pengajuan ini memiliki dokumen pendukung/alasan sah atau tidak. Jika tidak, sebutkan bahwa pengajuan ditolak karena melanggar batas harga resmi.
 4. PENTING: Tulis respon Anda dengan sangat singkat dan padat (maksimal 3 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...'). Tulis kalimat secara mengalir, ringkas, dan langsung ke inti informasi.
+5. DILARANG KERAS menulis dalam bahasa Mandarin, menggunakan huruf/aksara China (中文/汉字), atau tanda baca Mandarin. Seluruh respon Anda wajib ditulis 100% dalam Bahasa Indonesia yang baik dan benar.
 """
 
     # Query OpenViking RAG for local regulations context
@@ -441,6 +443,7 @@ Aturan Penulisan:
 }
 3. Gunakan "FLAGGED" jika harga kemahalan dan melanggar batas resmi. Gunakan "CLEARED" jika harga dinilai wajar.
 4. PENTING: Kesimpulan akhir (manager_conclusion) harus ditulis dengan sangat singkat (maksimal 2 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...').
+5. DILARANG KERAS menulis dalam bahasa Mandarin, menggunakan huruf/aksara China (中文/汉字), atau tanda baca Mandarin. Seluruh respon Anda (terutama isi manager_conclusion) wajib ditulis 100% dalam Bahasa Indonesia yang baik dan benar.
 """
 
     manager_user = (
