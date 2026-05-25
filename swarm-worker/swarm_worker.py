@@ -229,7 +229,7 @@ def query_local_regulations(item_name: str) -> list:
         return []
 
 
-def run_agent(system_prompt: str, user_prompt: str) -> str:
+def run_agent(system_prompt: str, user_prompt: str, max_tokens: int = 300) -> tuple[str, int, int]:
     """Utility to run a single agent completion."""
     try:
         response = client.chat.completions.create(
@@ -238,15 +238,25 @@ def run_agent(system_prompt: str, user_prompt: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2,  # Low temperature for analytical tasks
+            temperature=0.1,  # Lower temperature to reduce hallucinations/looping
+            max_tokens=max_tokens,
+            frequency_penalty=1.0,  # Strongly penalize repeated tokens (prevent "agaragaragar...")
+            presence_penalty=0.5,   # Encourage diversity of vocabulary
         )
         content = response.choices[0].message.content
         import re
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-        return content
+        
+        prompt_tokens = 0
+        completion_tokens = 0
+        if response.usage:
+            prompt_tokens = response.usage.prompt_tokens or 0
+            completion_tokens = response.usage.completion_tokens or 0
+            
+        return content, prompt_tokens, completion_tokens
     except Exception as e:
         print(f"[LLM Error] {e}")
-        return f"Error connecting to LLM: {str(e)}"
+        return f"Error connecting to LLM: {str(e)}", 0, 0
 
 
 def publish_progress(redis_conn, task_id, status, step, agent=None, message=None, progress=0):
@@ -265,7 +275,7 @@ def publish_progress(redis_conn, task_id, status, step, agent=None, message=None
         print(f"[Redis Publish Error] {e}")
 
 
-def run_swarm_evaluation(r, item: dict, task_id: str = "") -> tuple[str, list, str]:
+def run_swarm_evaluation(r, item: dict, task_id: str = "") -> tuple[str, list, str, float, int, int]:
     """
     Executes the multi-agent swarm evaluation for a single budget item.
 
@@ -277,13 +287,16 @@ def run_swarm_evaluation(r, item: dict, task_id: str = "") -> tuple[str, list, s
     Memory: pi-memctx pattern — inject relevant context before reasoning,
             learn durable memory after debate.
 
-    Returns: (status, agent_logs, manager_conclusion)
+    Returns: (status, agent_logs, manager_conclusion, max_price, total_prompt, total_completion)
     """
     item_json = json.dumps(item, ensure_ascii=False)
     item_name = item.get('name', '')
     item_location = item.get('metadata', {}).get('region', '') if item.get('metadata') else ''
 
     publish_progress(r, task_id, "PROCESSING", f"Querying regional prices and POJK reference for: {item_name}...", agent="System", progress=15)
+
+    total_prompt = 0
+    total_completion = 0
 
     # ------------------------------------------------------------------
     # 1. Agent Analis (Auditor) — with Nemesis + Memory Context
@@ -356,6 +369,7 @@ Aturan Penulisan:
 3. Sebutkan dengan jelas: harga yang diajukan, batas maksimal resmi, dan selisihnya.
 4. Nyatakan kesimpulan akhir secara langsung: Kemahalan (Markup) atau Wajar.
 5. Jika ada data historis pengadaan serupa dari Nemesis (SIRUP), sebutkan secara singkat perbandingan harga historisnya (misalnya rata-rata harga pengadaan serupa) untuk memperkuat hasil analisismu.
+6. PENTING: Tulis respon Anda dengan sangat singkat dan padat (maksimal 3 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...'). Tulis kalimat secara mengalir, ringkas, dan langsung ke inti informasi.
 {standar_harga_section}
 {memory_context}
 {override_context}
@@ -373,7 +387,9 @@ Aturan Penulisan:
         print(f"      Standard: max=Rp {standard_data['max_price']:,.0f}")
 
     publish_progress(r, task_id, "PROCESSING", f"Analis (Auditor) sedang membandingkan harga regional untuk {item_name}...", agent="Auditor", progress=35)
-    auditor_response = run_agent(auditor_system, auditor_prompt)
+    auditor_response, p1, c1 = run_agent(auditor_system, auditor_prompt)
+    total_prompt += p1
+    total_completion += c1
     publish_progress(r, task_id, "PROCESSING", f"Auditor selesai mengevaluasi {item_name}.", agent="Auditor", message=auditor_response, progress=50)
 
     # ------------------------------------------------------------------
@@ -387,6 +403,7 @@ Aturan Penulisan:
 1. Gunakan Bahasa Indonesia yang sederhana dan langsung pada intinya. Hindari pasal-pasal hukum yang rumit agar mudah dipahami orang non-IT/awam.
 2. JANGAN gunakan format markdown, heading, list, atau sub-judul tebal. Tulis langsung dalam 2-3 kalimat paragraf biasa.
 3. Nyatakan apakah pengajuan ini memiliki dokumen pendukung/alasan sah atau tidak. Jika tidak, sebutkan bahwa pengajuan ditolak karena melanggar batas harga resmi.
+4. PENTING: Tulis respon Anda dengan sangat singkat dan padat (maksimal 3 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...'). Tulis kalimat secara mengalir, ringkas, dan langsung ke inti informasi.
 """
 
     # Query OpenViking RAG for local regulations context
@@ -403,7 +420,9 @@ Aturan Penulisan:
     )
     print(f"  -> [Compliance] Reviewing: {item.get('name')}")
     publish_progress(r, task_id, "PROCESSING", f"Pengawas (Compliance) sedang meninjau aspek kepatuhan legal untuk {item_name}...", agent="Pengawas", progress=65)
-    compliance_response = run_agent(compliance_system, compliance_user)
+    compliance_response, p2, c2 = run_agent(compliance_system, compliance_user)
+    total_prompt += p2
+    total_completion += c2
     publish_progress(r, task_id, "PROCESSING", f"Compliance selesai meninjau {item_name}.", agent="Pengawas", message=compliance_response, progress=80)
 
     # ------------------------------------------------------------------
@@ -421,6 +440,7 @@ Aturan Penulisan:
     "manager_conclusion": "Tulis kesimpulan akhir di sini dalam 1-2 kalimat sederhana tanpa format markdown."
 }
 3. Gunakan "FLAGGED" jika harga kemahalan dan melanggar batas resmi. Gunakan "CLEARED" jika harga dinilai wajar.
+4. PENTING: Kesimpulan akhir (manager_conclusion) harus ditulis dengan sangat singkat (maksimal 2 kalimat). DILARANG KERAS mengulang-ulang kata secara beruntun (seperti 'agar agar agar...' atau 'yang yang yang...').
 """
 
     manager_user = (
@@ -431,7 +451,9 @@ Aturan Penulisan:
     )
     print(f"  -> [Manager] Concluding: {item.get('name')}")
     publish_progress(r, task_id, "PROCESSING", f"Kepala Manajer membuat konsensus akhir untuk {item_name}...", agent="Manager", progress=88)
-    manager_response_raw = run_agent(manager_system, manager_user)
+    manager_response_raw, p3, c3 = run_agent(manager_system, manager_user)
+    total_prompt += p3
+    total_completion += c3
 
     # Parse manager JSON — with robust regex & fallback parsing
     status = "CLEARED"
@@ -492,7 +514,7 @@ Aturan Penulisan:
         print(f"      Memory: learned {total_notes} notes across agents")
 
     max_price = standard_data.get("max_price", 0) if standard_data else 0
-    return status, agent_logs, manager_conclusion, max_price
+    return status, agent_logs, manager_conclusion, max_price, total_prompt, total_completion
 
 
 def process_task(r, task_data: dict) -> None:
@@ -506,11 +528,15 @@ def process_task(r, task_data: dict) -> None:
 
     results = []
     markup_count = 0
+    total_task_prompt = 0
+    total_task_completion = 0
 
     for idx, item in enumerate(items):
         item_name = item.get('name', f"Item {idx+1}")
         publish_progress(r, task_id, "PROCESSING", f"Memulai analisis item {idx+1} dari {len(items)}: {item_name}...", agent="System", progress=10)
-        status, agent_logs, manager_conclusion, max_price = run_swarm_evaluation(r, item, task_id)
+        status, agent_logs, manager_conclusion, max_price, p_tokens, c_tokens = run_swarm_evaluation(r, item, task_id)
+        total_task_prompt += p_tokens
+        total_task_completion += c_tokens
 
         if status == "FLAGGED":
             markup_count += 1
@@ -540,10 +566,10 @@ def process_task(r, task_data: dict) -> None:
         f"{r['item_id']}:{r['status']}:{r['manager_conclusion']}" 
         for r in results
     ])
-    rationale_hash = "0x" + hashlib.sha256(rationale_text.encode()).hexdigest()[:40]
+    rationale_hash = "0x" + hashlib.sha256(rationale_text.encode()).hexdigest()
     
     consensus_text = f"{task_id}:{markup_count}:{len(items)}"
-    consensus_hash = "0x" + hashlib.sha256(consensus_text.encode()).hexdigest()[:40]
+    consensus_hash = "0x" + hashlib.sha256(consensus_text.encode()).hexdigest()
 
     response_payload = {
         "task_id": task_id,
@@ -559,6 +585,11 @@ def process_task(r, task_data: dict) -> None:
             "status": "PENDING_COMMIT",
         },
         "results": results,
+        "token_usage": {
+            "prompt_tokens": total_task_prompt,
+            "completion_tokens": total_task_completion,
+            "model": MODEL_NAME,
+        }
     }
 
     # Send webhook back to Elysian Go backend
