@@ -610,6 +610,85 @@ def process_task(r, task_data: dict) -> None:
         print("[Worker] No webhook URL provided, skipping callback.")
 
 
+def _get_elysian_conn():
+    """Get connection to the main Elysian PostgreSQL database."""
+    try:
+        conn = psycopg2.connect(
+            host="localhost",
+            port=5432,
+            user="elysian",
+            password="elysian123",
+            dbname="elysian"
+        )
+        return conn
+    except Exception as e:
+        print(f"[Elysian DB Connection Error] {e}")
+        return None
+
+
+def handle_update_memory_pack(task_data: dict) -> None:
+    """Processes memory pack updates when a human override occurs."""
+    item_id = task_data.get("item_id")
+    justification = task_data.get("justification")
+    
+    print(f"\n[Memory Pack Worker] Received ml:update_memory_pack instruction from Redis for Item ID: {item_id}")
+    print(f"[Memory Pack Worker] Human Override Justification: '{justification}'")
+    
+    conn = _get_elysian_conn()
+    if conn is None:
+        print("[Memory Pack Worker] ERROR: Failed to connect to Elysian DB to fetch action item details.")
+        return
+        
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM action_items WHERE id = %s", [item_id])
+        item = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if not item:
+            print(f"[Memory Pack Worker] ERROR: Action item with ID {item_id} not found in database.")
+            return
+            
+        description = item.get("description", "")
+        metadata_str = item.get("metadata_json", "{}")
+        metadata = {}
+        if metadata_str:
+            if isinstance(metadata_str, dict):
+                metadata = metadata_str
+            else:
+                try:
+                    metadata = json.loads(metadata_str)
+                except Exception:
+                    metadata = {}
+                    
+        # Extract item details for memory learning
+        item_name = metadata.get("title", description or "Unknown Item")
+        
+        print(f"[Memory Pack Worker] Fetched details for: '{item_name}'")
+        print(f"[Memory Pack Worker] Saving justification to auditor memory pack...")
+        
+        # Save to auditor memory pack as a decision!
+        if _MEMORY_ENABLED:
+            auditor_mem = AgentMemory("auditor")
+            title = f"Human Override: {item_name[:30]}"
+            content = f"Item '{item_name}' disetujui secara manual oleh operator manusia. Justifikasi: {justification}"
+            tags = ["override", "human-qa", item_name.split()[0].lower() if item_name else "general"]
+            
+            path = auditor_mem.learn_decision(
+                title=title,
+                content=content,
+                tags=tags,
+                source=item_id
+            )
+            print(f"[Memory Pack Worker] SUCCESS: Justification saved to memory pack file: {path}")
+        else:
+            print("[Memory Pack Worker] WARNING: Memory layer is disabled. Note was not saved.")
+            
+    except Exception as e:
+        print(f"[Memory Pack Worker] ERROR: Failed to update memory pack: {e}")
+
+
 def main() -> None:
     print(f"[Elysian Swarm Worker] Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} db={REDIS_DB}")
 
@@ -625,18 +704,21 @@ def main() -> None:
             decode_responses=True,
         )
         r.ping()
-        print(f"[Worker] Connected to Redis. Listening on queue: {REDIS_QUEUE}")
+        print(f"[Worker] Connected to Redis. Listening on queues: {REDIS_QUEUE}, ml:update_memory_pack")
     except Exception as e:
         print(f"[Worker] Failed to connect to Redis: {str(e)}")
         sys.exit(1)
 
     while True:
         try:
-            result = r.brpop(REDIS_QUEUE, timeout=0)
+            result = r.brpop([REDIS_QUEUE, "ml:update_memory_pack"], timeout=0)
             if result:
-                _queue_name, task_json = result
+                queue_name, task_json = result
                 task_data = json.loads(task_json)
-                process_task(r, task_data)
+                if queue_name == "ml:update_memory_pack":
+                    handle_update_memory_pack(task_data)
+                else:
+                    process_task(r, task_data)
         except json.JSONDecodeError:
             print(f"[Worker] Failed to decode task JSON: {task_json}")
         except Exception as e:
