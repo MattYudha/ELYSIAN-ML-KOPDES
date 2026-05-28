@@ -40,3 +40,6 @@ wheels/
 .DS_Store
 Thumbs.db
 swarm-worker/memory/
+
+# Junk
+powershell.bat
