@@ -62,8 +62,23 @@ _nemesis_conn = None
 
 
 def _get_nemesis_conn():
-    """Lazy-init PostgreSQL connection to Nemesis DB."""
+    """Lazy-init PostgreSQL connection to Nemesis DB with liveness check."""
     global _nemesis_conn
+    
+    if _nemesis_conn is not None:
+        if _nemesis_conn.closed:
+            _nemesis_conn = None
+        else:
+            try:
+                with _nemesis_conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception:
+                try:
+                    _nemesis_conn.close()
+                except Exception:
+                    pass
+                _nemesis_conn = None
+
     if _nemesis_conn is None:
         try:
             _nemesis_conn = psycopg2.connect(
@@ -196,6 +211,7 @@ def query_standard_price(item_name: str) -> dict:
 
 
 OPENVIKING_API_URL = os.getenv("OPENVIKING_API_URL", "http://localhost:1929")
+http_session = requests.Session()
 
 
 def query_local_regulations(item_name: str) -> list:
@@ -211,7 +227,7 @@ def query_local_regulations(item_name: str) -> list:
         "top_k": 2
     }
     try:
-        resp = requests.post(url, json=payload, timeout=5)
+        resp = http_session.post(url, json=payload, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             results = data.get("results", [])
@@ -475,9 +491,12 @@ Aturan Penulisan:
         status_match = re.search(r'"status"\s*:\s*"([^"]+)"', clean_json)
         conclusion_match = re.search(r'"manager_conclusion"\s*:\s*"([^"]+)"', clean_json)
         if status_match:
-            status = status_match.group(1)
+            parsed_val = status_match.group(1).upper().strip()
+            status = "FLAGGED" if "FLAGGED" in parsed_val else "CLEARED"
         else:
-            status = "FLAGGED" if "FLAGGED" in manager_response_raw.upper() else "CLEARED"
+            # Strict regex search matching whole words FLAGGED or CLEARED
+            loose_status_match = re.search(r'\b(FLAGGED|CLEARED)\b', clean_json.upper())
+            status = loose_status_match.group(1) if loose_status_match else "FLAGGED"
             
         if conclusion_match:
             manager_conclusion = conclusion_match.group(1)
@@ -610,20 +629,40 @@ def process_task(r, task_data: dict) -> None:
         print("[Worker] No webhook URL provided, skipping callback.")
 
 
+_elysian_conn = None
+
+
 def _get_elysian_conn():
-    """Get connection to the main Elysian PostgreSQL database."""
-    try:
-        conn = psycopg2.connect(
-            host="localhost",
-            port=5432,
-            user="elysian",
-            password="elysian123",
-            dbname="elysian"
-        )
-        return conn
-    except Exception as e:
-        print(f"[Elysian DB Connection Error] {e}")
-        return None
+    """Get persistent connection to the main Elysian PostgreSQL database with liveness check."""
+    global _elysian_conn
+    if _elysian_conn is not None:
+        if _elysian_conn.closed:
+            _elysian_conn = None
+        else:
+            try:
+                with _elysian_conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception:
+                try:
+                    _elysian_conn.close()
+                except Exception:
+                    pass
+                _elysian_conn = None
+
+    if _elysian_conn is None:
+        try:
+            _elysian_conn = psycopg2.connect(
+                host="localhost",
+                port=5432,
+                user="elysian",
+                password="elysian123",
+                dbname="elysian"
+            )
+            _elysian_conn.autocommit = True
+        except Exception as e:
+            print(f"[Elysian DB Connection Error] {e}")
+            _elysian_conn = None
+    return _elysian_conn
 
 
 def handle_update_memory_pack(task_data: dict) -> None:
@@ -644,7 +683,6 @@ def handle_update_memory_pack(task_data: dict) -> None:
         cursor.execute("SELECT * FROM action_items WHERE id = %s", [item_id])
         item = cursor.fetchone()
         cursor.close()
-        conn.close()
         
         if not item:
             print(f"[Memory Pack Worker] ERROR: Action item with ID {item_id} not found in database.")
