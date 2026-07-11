@@ -34,7 +34,8 @@ REDIS_QUEUE = "swarm:tasks"
 # Supports any OpenAI-compatible endpoint (e.g., OpenAI, Aliyun Qwen, etc.)
 client = OpenAI(
     api_key=os.getenv("LLM_API_KEY", "dummy_key"),
-    base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+    default_headers={"x-litellm-api-key": os.getenv("LLM_API_KEY", "dummy_key")}
 )
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "gpt-4o-mini")
 
